@@ -75,16 +75,24 @@ retain = cf.get('mqtt_retain', False)
 
 topic_prefix = cf.get('mqtt_topic_prefix', 'broadlink/')
 
+device_accessories_dict = {}
 
 # noinspection PyUnusedLocal
 def on_message(client, device, msg):
-    command = msg.topic[len(topic_prefix):]
+    command = msg.topic[len(topic_prefix):].lower()
 
     if isinstance(device, dict):
         for subprefix in device:
             if command.startswith(subprefix):
+                #example broadlink/rm.../fan/alkova/state 
                 device = device[subprefix]
+                device_id = subprefix
+                command_accessory = command.split("/")[-1]
+                accessory = command[len(subprefix):-len(command_accessory)-1]
                 command = command[len(subprefix):]
+                
+                
+                
                 break
         else:
             logging.error("MQTT topic %s has no recognized device reference, expected one of %s" %
@@ -103,111 +111,157 @@ def on_message(client, device, msg):
         return
 
     try:
-        action = msg.payload.decode('utf-8').lower()
-        logging.debug("Received MQTT message " + msg.topic + " " + action)
+        action = msg.payload.decode('utf-8')
+        logging.debug("Received MQTT message " + msg.topic + " " + action + " type "+device.type)
+        
+        unique_id = device_id  + accessory
+           
 
-        # SP1/2 / MP1/ BG1 power control
-        if command == 'power':
-            if device.type == 'SP1' or device.type == 'SP2':
-                state = action == 'on' or action == '1'
-                logging.debug("Setting power state to {0}".format(state))
-                device.set_power(1 if state else 0)
-                return
+     
+        # # RM2/RM4 record/replay control
+        # if device.type == 'RM2' or device.type == 'RM4':
+            # file = dirname + "commands/" + command
+            # handy_file = file + '/' + action
 
-            if device.type == 'MP1':
-                parts = action.split("/", 2)
-                if len(parts) == 2:
-                    sid = int(parts[0])
-                    state = parts[1] == 'on' or parts[1] == '1'
-                    logging.debug("Setting power state of socket {0} to {1}".format(sid, state))
-                    device.set_power(sid, state)
-                    return
-
-            if device.type == 'BG1':
-                state = action == 'on' or action == '1'
-                logging.debug("Setting power state of all sockets to {0}".format(state))
-                device.set_state(pwr1=state, pwr2=state)
-                return
-
-        # MP1 power control
-        if command.startswith('power/') and device.type == 'MP1':
-            sid = int(command[6:])
-            state = action == 'on' or action == '1'
-            logging.debug("Setting power state of socket {0} to {1}".format(sid, state))
-            device.set_power(sid, state)
-            return
-
-        # BG1 power control
-        if command.startswith('power/') and device.type == 'BG1':
-            sid = int(command[6:])
-            state = action == 'on' or action == '1'
-            logging.debug("Setting power state of socket {0} to {1}".format(sid, state))
-            if sid == 1:
-                device.set_state(pwr1=state)
-            elif sid == 2:
-                 device.set_state(pwr2=state)
-            return
-
-        # BG1 led brightness
-        if command == 'brightness' and device.type == 'BG1':
-            state = int(action)
-            logging.debug("Setting led brightness to {0}".format(state))
-            device.set_state(idcbrightness=state)
-            return
-
-        # Dooya curtain control
-        if command == 'action':
-            if device.type == 'Dooya DT360E':
-                if action == 'open':
-                    logging.debug("Opening curtain")
-                    device.open()
-                    device.publish(100)
-                elif action == 'close':
-                    logging.debug("Closing curtain")
-                    device.close()
-                    device.publish(0)
-                elif action == 'stop':
-                    logging.debug("Stopping curtain")
-                    device.stop()
-                    device.publish(device.get_percentage())
+            # if action == '' or action == 'auto':
+                # record_or_replay(device, file)
+                # return
+            # elif action == 'autorf':
+                # record_or_replay_rf(device, file)
+                # return
+            # elif os.path.isfile(handy_file):
+                # replay(device, handy_file)
+                # return
+            # elif action == 'record':
+                # record(device, file)
+                # return
+            # elif action == 'recordrf':
+                # record_rf(device, file)
+                # return
+            # elif action == 'replay':
+                # replay(device, file)
+                # mqttc.publish(msg.topic, "executed", qos=0, retain=False)
+                # return
+            # elif action == 'macro':
+                # file = dirname + "macros/" + command
+                # macro(device, file)
+                # return
+            # elif action == 'executed':
+                # return
+                
+        if device.type == 'RM2' or device.type == 'RM4':  
+            logging.debug("Received accessory command " + accessory + " command "+command_accessory + " action "+action)
+            #find accessory
+            
+            
+            
+            #check if accessory in list
+            if unique_id in device_accessories_dict:
+                logging.debug("Found accessory " + unique_id)
+            else:
+                if(command_accessory == 'status'): #take last status from mqtt
+                    logging.debug("Found last accessory status on mqtt")
+                    device_accessories_dict[unique_id] = json.loads(action)
                 else:
-                    logging.warning("Unrecognized curtain action " + action)
-                return
+                    logging.debug("Accessory " + unique_id + " not found...creating")
+                    if accessory.find('fan/') != -1: #is fan
+                        device_accessories_dict[unique_id] = { "on": False, "rotationSpeed": 50, "rotationDirection": 0 }
+                    elif accessory.find('ac/') != -1: #is ac
+                        device_accessories_dict[unique_id] = { "on": False, "targetTemperature": 25 }
+            
+            action = action.lower()
+            
+            if command_accessory[0:3] == 'get':
+                mqttc.publish(topic_prefix+unique_id+"/status", json.dumps(device_accessories_dict[unique_id]), qos=0, retain=True)
+                
+            elif command_accessory[0:3] == 'set':    
+                subcommand = command_accessory[3:]
+                
+                speedmultiplier = 10
+                
+                
+                
+                if accessory.find('fan/alpha') != -1: #is alpha, only 5 speeds
+                    #logging.debug("Is Alpha fan")
+                    speedmultiplier = 100 / 5
+                    subdir = "commands/fan/alpha"
+                elif accessory.find('fan/alkova') != -1: #is alkova, only 8 speeds
+                    speedmultiplier = 100 / 8
+                    subdir = "commands/fan/alkova"
+                elif accessory.find('fan/daikin') != -1: #is alkova, only 8 speeds
+                    speedmultiplier = 100 / 5
+                    subdir = "commands/fan/daikin"
+                elif accessory.find('ac/daikin') != -1: #is alkova, only 8 speeds
+                    #speedmultiplier = 100 / 5
+                    subdir = "commands/ac/daikin"
+                else:
+                    logging.debug("Device type not identified")
+                    return
+                
+                if subcommand == 'on':
+                             
+                    if action == 'true':
+                        targetstate = 'on'
+                        targetstate_b = True
+                    elif action == 'false':
+                        targetstate = 'off'
+                        targetstate_b = False
+                    else:
+                        return
 
-        if command == 'set' and device.type == 'Dooya DT360E':
-            percentage = int(action)
-            logging.debug("Setting curtain position to {0}".format(percentage))
-            device.set_percentage_and_wait(percentage)
-            device.publish(device.get_percentage())
+                    file = dirname + subdir + "/" + targetstate
+                    if targetstate == 'off' or device_accessories_dict[unique_id]['on'] != targetstate_b: #always play when to be turned off. On only if in different states
+                        replay(device, file)
+                    device_accessories_dict[unique_id]['on'] = targetstate_b
+                    if targetstate_b == False:
+                        if accessory.find('fan/') != -1:
+                            device_accessories_dict[unique_id]['rotationDirection'] = 0  #reset rotationdirection
+                            
+                    if targetstate_b == True:
+                        if accessory.find('ac/') != -1:
+                            device_accessories_dict[unique_id]['targetTemperature'] = 25  #reset targetTemperature
+                    time.sleep(0.5) #wait x second with response
+                    mqttc.publish(topic_prefix+unique_id+"/status", json.dumps(device_accessories_dict[unique_id]), qos=0, retain=True)
+                    return
+                    
+
+
+                if subcommand == 'rotationspeed':
+                    target_speed = int( action )
+                    fanspeed = round( target_speed / speedmultiplier )
+                    file = dirname + subdir + "/fan" + str(fanspeed)
+                    if 'rotationSpeed' in device_accessories_dict[unique_id] and device_accessories_dict[unique_id]['rotationSpeed'] != round(fanspeed * speedmultiplier): #only replay if different state
+                        replay(device, file)
+                    device_accessories_dict[unique_id]['rotationSpeed'] = round(fanspeed * speedmultiplier)
+                    time.sleep(0.5) #wait x second with response
+                    mqttc.publish(topic_prefix+unique_id+"/status", json.dumps(device_accessories_dict[unique_id]), qos=0, retain=True)
+                    return
+                    
+                    
+                if subcommand == 'rotationdirection':
+                    
+                    file = dirname + subdir + "/toggleclockwise"
+                    if 'rotationDirection' in device_accessories_dict[unique_id] and device_accessories_dict[unique_id]['rotationDirection'] != int(action): #only replay if different state
+                        replay(device, file)
+                    device_accessories_dict[unique_id]['rotationDirection'] = int(action)
+                    time.sleep(0.5) #wait x second with response
+                    mqttc.publish(topic_prefix+unique_id+"/status", json.dumps(device_accessories_dict[unique_id]), qos=0, retain=True)
+                    return
+                         
+                if subcommand == 'targettemperature':
+                    target_temperature = round( float( action ))
+
+                    file = dirname + subdir + "/cool" + str(target_temperature)
+                    if 'targetTemperature' in device_accessories_dict[unique_id] and device_accessories_dict[unique_id]['targetTemperature'] != target_temperature: #only replay if different state
+                        replay(device, file)
+                    device_accessories_dict[unique_id]['targetTemperature'] = target_temperature
+                    time.sleep(0.5) #wait x second with response
+                    mqttc.publish(topic_prefix+unique_id+"/status", json.dumps(device_accessories_dict[unique_id]), qos=0, retain=True)
+                    return
+                    
+            
+            
             return
-
-        # RM2/RM4 record/replay control
-        if device.type == 'RM2' or device.type == 'RM4':
-            file = dirname + "commands/" + command
-            handy_file = file + '/' + action
-
-            if action == '' or action == 'auto':
-                record_or_replay(device, file)
-                return
-            elif action == 'autorf':
-                record_or_replay_rf(device, file)
-                return
-            elif os.path.isfile(handy_file):
-                replay(device, handy_file)
-                return
-            elif action == 'record':
-                record(device, file)
-                return
-            elif action == 'recordrf':
-                record_rf(device, file)
-                return
-            elif action == 'replay':
-                replay(device, file)
-                return
-            elif action == 'macro':
-                file = dirname + "macros/" + command
-                macro(device, file)
-                return
 
         logging.warning("Unrecognized MQTT message " + action)
     except Exception:
@@ -361,6 +415,29 @@ def get_device(cf):
                 host=device.host[0],
                 mac='_'.join(format(s, '02x') for s in device.mac[::-1]),
                 mac_nic='_'.join(format(s, '02x') for s in device.mac[2::-1]))
+            device = configure_device(device, topic_prefix + mqtt_subprefix)
+            devices_dict[mqtt_subprefix] = device
+        return devices_dict
+    elif device_type == 'multiple_devices':
+        devices_dict = {}
+        mqtt_multiple_prefix_format = cf.get('mqtt_multiple_subprefix_format', None)
+        x = 0
+        while (x < 5):
+            x = x + 1
+            device_host = cf.get('device_host_'+str(x),'none')
+            if device_host == 'none':
+                break
+            device_host = (device_host,80)
+            device_mac = cf.get('device_mac_'+str(x),'none')
+            if device_mac == 'none':
+                break
+            device_mac = bytearray.fromhex(device_mac.replace(':', ' '))
+            mqtt_subprefix = mqtt_multiple_prefix_format.format(
+                type='rm',
+                host=device_host,
+                mac='_'.join(format(s, '02x') for s in device_mac[::-1]),
+                mac_nic='_'.join(format(s, '02x') for s in device_mac[2::-1]))
+            device = broadlink.rm(host=device_host, mac=device_mac, devtype=0x2712)
             device = configure_device(device, topic_prefix + mqtt_subprefix)
             devices_dict[mqtt_subprefix] = device
         return devices_dict
@@ -594,6 +671,10 @@ if __name__ == '__main__':
     mqttc.on_connect = on_connect
     mqttc.on_disconnect = on_disconnect
 
+    #if isinstance(devices, dict):
+    #    for subprefix in devices:
+    #        logging.debug("Subprefix: "+subprefix)
+            
     if cf.get('mqtt_will_payload', False):
         mqttc.will_set(cf.get('mqtt_will_topic', 'clients/broadlink'), payload=cf.get('mqtt_will_payload'), qos=0, retain=True)
 
